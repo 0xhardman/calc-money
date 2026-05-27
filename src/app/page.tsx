@@ -1,87 +1,100 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import type { Transaction } from "@/lib/db";
+import type { Transaction, Person } from "@/lib/db";
 
 const CATEGORIES = [
   "餐饮", "交通", "住宿", "景点门票", "购物",
   "行李寄存", "通讯", "取现", "手续费", "其他",
 ];
+const CURRENCIES = ["EUR", "CNY", "USD", "TRY"];
 
 export default function Home() {
   const [txns, setTxns] = useState<Transaction[]>([]);
+  const [people, setPeople] = useState<Person[]>([]);
   const [loading, setLoading] = useState(true);
-  const [savingId, setSavingId] = useState<number | null>(null);
+  const [editing, setEditing] = useState<number | null>(null);
 
   useEffect(() => {
-    fetch("/api/transactions")
-      .then((r) => r.json())
-      .then((data) => {
-        setTxns(data);
-        setLoading(false);
-      });
+    Promise.all([
+      fetch("/api/transactions").then((r) => r.json()),
+      fetch("/api/people").then((r) => r.json()),
+    ]).then(([t, p]) => {
+      setTxns(t);
+      setPeople(p);
+      setLoading(false);
+    });
   }, []);
 
-  async function addCaoTxn() {
-    const date = prompt("日期 YYYY-MM-DD", "2026-05-15");
-    if (!date) return;
-    const merchant = prompt("商户/描述");
-    if (!merchant) return;
-    const amount = prompt("金额 (RMB)");
-    if (!amount) return;
-    const r = await fetch("/api/transactions/new", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        trans_date: date,
-        merchant,
-        rmb_amount: Number(amount),
-        paid_by: "cao",
-        is_shared: true,
-        share_count: 2,
-      }),
-    });
-    const created = await r.json();
-    setTxns((prev) => [...prev, created].sort((a, b) =>
-      a.trans_date.localeCompare(b.trans_date),
-    ));
-  }
-
-  async function update(id: number, patch: Partial<Transaction>) {
-    setSavingId(id);
+  async function patch(id: number, body: object) {
     const r = await fetch(`/api/transactions/${id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(patch),
+      body: JSON.stringify(body),
     });
     const updated = await r.json();
     setTxns((prev) => prev.map((t) => (t.id === id ? updated : t)));
-    setSavingId(null);
   }
 
-  // 按币种分别汇总；不做汇率换算
+  async function addEmpty() {
+    const r = await fetch(`/api/transactions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        trans_date: "2026-05-15",
+        merchant: "新账单",
+        amount: 0.01,
+        currency: "EUR",
+        payer_id: people[0]?.id,
+        source: "manual",
+        participants: people.map((p) => ({
+          person_id: p.id,
+          share_ratio: 1 / people.length,
+        })),
+      }),
+    });
+    const created = await r.json();
+    setTxns((prev) => [...prev, created]);
+    setEditing(created.id);
+  }
+
+  async function remove(id: number) {
+    if (!confirm("删除这笔账单？")) return;
+    await fetch(`/api/transactions/${id}`, { method: "DELETE" });
+    setTxns((prev) => prev.filter((t) => t.id !== id));
+  }
+
+  // 按币种聚合，计算每个人的净额
   const summary = useMemo(() => {
-    type Bucket = { total: number; iPaid: number; caoPaid: number; caoOwesMe: number; iOweCao: number };
+    type Bucket = {
+      total: number;
+      paid: Record<number, number>;     // person_id -> paid amount
+      consumed: Record<number, number>; // person_id -> share consumed
+    };
     const buckets: Record<string, Bucket> = {};
-    const ensure = (c: string) =>
-      (buckets[c] ??= { total: 0, iPaid: 0, caoPaid: 0, caoOwesMe: 0, iOweCao: 0 });
+    const ensure = (c: string): Bucket => {
+      if (!buckets[c]) {
+        buckets[c] = { total: 0, paid: {}, consumed: {} };
+        people.forEach((p) => {
+          buckets[c].paid[p.id] = 0;
+          buckets[c].consumed[p.id] = 0;
+        });
+      }
+      return buckets[c];
+    };
 
     for (const t of txns) {
       if (t.status === "cancelled") continue;
-      const cur = t.original_currency || "CNY";
-      const amt = Number(t.original_amount ?? t.rmb_amount);
-      const b = ensure(cur);
+      const b = ensure(t.currency);
+      const amt = Number(t.amount);
       b.total += amt;
-      if (t.paid_by === "cao") b.caoPaid += amt;
-      else b.iPaid += amt;
-      if (t.is_shared) {
-        const n = t.share_count || 1;
-        if (t.paid_by === "cao") b.iOweCao += amt / n;
-        else b.caoOwesMe += (amt / n) * (n - 1);
+      b.paid[t.payer_id] = (b.paid[t.payer_id] ?? 0) + amt;
+      for (const p of t.participants) {
+        b.consumed[p.person_id] = (b.consumed[p.person_id] ?? 0) + Number(p.computed_share);
       }
     }
     return buckets;
-  }, [txns]);
+  }, [txns, people]);
 
   if (loading) return <div className="p-8 text-gray-500">加载中…</div>;
 
@@ -91,132 +104,44 @@ export default function Home() {
         <div className="flex items-center justify-between mb-2">
           <h1 className="text-2xl font-bold">🇮🇹 意大利账单</h1>
           <button
-            onClick={addCaoTxn}
+            onClick={addEmpty}
             className="bg-blue-600 hover:bg-blue-700 text-white text-sm px-4 py-2 rounded shadow"
           >
-            + 添加小曹账单
+            + 新增账单
           </button>
         </div>
-        <p className="text-sm text-gray-500 mb-6">5/13 – 5/23 · 与小曹同行</p>
+        <p className="text-sm text-gray-500 mb-6">
+          5/13 – 5/23 · 同行人: {people.map((p) => p.name).join(", ")}
+        </p>
 
-        <div className="space-y-4 mb-6">
-          {Object.entries(summary).map(([cur, b]) => {
-            const net = b.caoOwesMe - b.iOweCao;
-            return (
-              <div key={cur} className="bg-white rounded-lg shadow p-4">
-                <div className="text-sm font-semibold mb-3 text-gray-700">
-                  {currencyLabel(cur)} 结算
-                </div>
-                <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-                  <Card label="总花费" value={b.total} currency={cur} />
-                  <Card label="我已付" value={b.iPaid} currency={cur} />
-                  <Card label="小曹已付" value={b.caoPaid} currency={cur} />
-                  <Card label="小曹该分摊" value={b.caoOwesMe} currency={cur} />
-                  <Card
-                    label={net >= 0 ? "小曹应付我" : "我应付小曹"}
-                    value={Math.abs(net)}
-                    currency={cur}
-                    highlight
-                  />
-                </div>
-              </div>
-            );
-          })}
-        </div>
+        <Settlements buckets={summary} people={people} />
 
-        <div className="overflow-x-auto bg-white rounded-lg shadow">
+        <div className="mt-6 bg-white rounded-lg shadow overflow-hidden">
           <table className="min-w-full text-sm">
             <thead className="bg-gray-100 text-gray-600">
               <tr>
                 <th className="px-3 py-2 text-left">日期</th>
                 <th className="px-3 py-2 text-left">商户</th>
-                <th className="px-3 py-2 text-right">原始</th>
-                <th className="px-3 py-2 text-right">RMB</th>
-                <th className="px-3 py-2 text-center">付款人</th>
+                <th className="px-3 py-2 text-right">金额</th>
+                <th className="px-3 py-2 text-center">出账人</th>
+                <th className="px-3 py-2 text-left">分摊明细</th>
                 <th className="px-3 py-2 text-left">分类</th>
-                <th className="px-3 py-2 text-center">分摊</th>
-                <th className="px-3 py-2 text-center">人数</th>
-                <th className="px-3 py-2 text-right">我承担</th>
                 <th className="px-3 py-2 text-left">备注</th>
+                <th className="px-3 py-2"></th>
               </tr>
             </thead>
             <tbody>
               {txns.map((t) => (
-                <tr
+                <TxnRow
                   key={t.id}
-                  className={`border-t hover:bg-gray-50 ${
-                    t.status === "cancelled" ? "opacity-40 line-through" : ""
-                  } ${t.status === "missed" ? "bg-amber-50" : ""}`}
-                >
-                  <td className="px-3 py-2 whitespace-nowrap text-gray-500">{t.trans_date}</td>
-                  <td className="px-3 py-2 font-mono text-xs">{t.merchant}</td>
-                  <td className="px-3 py-2 text-right font-semibold whitespace-nowrap">
-                    {t.original_amount
-                      ? `${currencySymbol(t.original_currency)}${Number(t.original_amount).toFixed(2)}`
-                      : "—"}
-                  </td>
-                  <td className="px-3 py-2 text-right text-gray-500 text-xs whitespace-nowrap">
-                    ¥{Number(t.rmb_amount).toFixed(2)}
-                  </td>
-                  <td className="px-3 py-2 text-center">
-                    <select
-                      className={`border rounded px-2 py-1 text-xs ${
-                        t.paid_by === "cao" ? "bg-blue-50" : "bg-white"
-                      }`}
-                      value={t.paid_by}
-                      onChange={(e) => update(t.id, { paid_by: e.target.value })}
-                    >
-                      <option value="me">我</option>
-                      <option value="cao">小曹</option>
-                    </select>
-                  </td>
-                  <td className="px-3 py-2">
-                    <select
-                      className="border rounded px-2 py-1 text-xs bg-white"
-                      value={t.category ?? ""}
-                      onChange={(e) => update(t.id, { category: e.target.value })}
-                    >
-                      <option value="">—</option>
-                      {CATEGORIES.map((c) => (
-                        <option key={c} value={c}>{c}</option>
-                      ))}
-                    </select>
-                  </td>
-                  <td className="px-3 py-2 text-center">
-                    <input
-                      type="checkbox"
-                      checked={t.is_shared}
-                      onChange={(e) => update(t.id, { is_shared: e.target.checked })}
-                    />
-                  </td>
-                  <td className="px-3 py-2 text-center">
-                    <input
-                      type="number"
-                      min={1}
-                      max={10}
-                      className="w-14 border rounded px-1 py-1 text-xs text-center"
-                      value={t.share_count}
-                      onChange={(e) => update(t.id, { share_count: Number(e.target.value) })}
-                    />
-                  </td>
-                  <td className="px-3 py-2 text-right text-gray-700">
-                    ¥{t.my_share ? Number(t.my_share).toFixed(2) : "—"}
-                  </td>
-                  <td className="px-3 py-2">
-                    <input
-                      type="text"
-                      defaultValue={t.note ?? ""}
-                      onBlur={(e) => {
-                        if (e.target.value !== (t.note ?? ""))
-                          update(t.id, { note: e.target.value });
-                      }}
-                      className="w-full border rounded px-2 py-1 text-xs"
-                    />
-                    {savingId === t.id && (
-                      <span className="ml-1 text-xs text-blue-500">保存中…</span>
-                    )}
-                  </td>
-                </tr>
+                  txn={t}
+                  people={people}
+                  editing={editing === t.id}
+                  onEdit={() => setEditing(t.id)}
+                  onClose={() => setEditing(null)}
+                  onPatch={(body) => patch(t.id, body)}
+                  onDelete={() => remove(t.id)}
+                />
               ))}
             </tbody>
           </table>
@@ -226,30 +151,356 @@ export default function Home() {
   );
 }
 
-function Card({
-  label,
-  value,
-  currency,
-  highlight,
+function Settlements({
+  buckets,
+  people,
 }: {
-  label: string;
-  value: number;
-  currency: string;
-  highlight?: boolean;
+  buckets: Record<string, { total: number; paid: Record<number, number>; consumed: Record<number, number> }>;
+  people: Person[];
 }) {
   return (
-    <div
-      className={`rounded-lg p-4 ${
-        highlight ? "bg-emerald-600 text-white" : "bg-gray-50"
-      }`}
-    >
-      <div className={`text-xs ${highlight ? "text-emerald-100" : "text-gray-500"}`}>
-        {label}
+    <div className="space-y-4">
+      {Object.entries(buckets).map(([cur, b]) => {
+        const nets: Record<number, number> = {};
+        people.forEach((p) => {
+          nets[p.id] = (b.paid[p.id] ?? 0) - (b.consumed[p.id] ?? 0);
+        });
+        // 两两关系: 谁付谁多少 (净额视角下，正数=应收，负数=应付)
+        // 简单 2 人: A net = +X 表示 B 欠 A X
+        const sorted = [...people].sort((a, b) => (nets[b.id] ?? 0) - (nets[a.id] ?? 0));
+        const debts: { from: string; to: string; amount: number }[] = [];
+        if (people.length === 2 && sorted.length === 2) {
+          const creditor = sorted[0];
+          const debtor = sorted[1];
+          const amt = (nets[creditor.id] ?? 0);
+          if (amt > 0.01) debts.push({ from: debtor.name, to: creditor.name, amount: amt });
+        }
+
+        return (
+          <div key={cur} className="bg-white rounded-lg shadow p-4">
+            <div className="flex items-center gap-3 mb-3">
+              <span className="text-sm font-semibold text-gray-700">{currencyLabel(cur)}</span>
+              <span className="text-xs text-gray-400">总花费 {currencySymbol(cur)}{b.total.toFixed(2)}</span>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+              {people.map((p) => {
+                const paid = b.paid[p.id] ?? 0;
+                const consumed = b.consumed[p.id] ?? 0;
+                const net = paid - consumed;
+                return (
+                  <div key={p.id} className="border rounded p-3">
+                    <div className="font-medium text-sm">{p.name}</div>
+                    <div className="text-xs text-gray-500 mt-1">
+                      已付 {currencySymbol(cur)}{paid.toFixed(2)} · 消费 {currencySymbol(cur)}{consumed.toFixed(2)}
+                    </div>
+                    <div className={`mt-1 text-sm font-semibold ${net >= 0 ? "text-emerald-600" : "text-rose-600"}`}>
+                      {net >= 0 ? "应收" : "应付"} {currencySymbol(cur)}{Math.abs(net).toFixed(2)}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            {debts.length > 0 && (
+              <div className="mt-3 p-2 bg-emerald-50 rounded text-sm text-emerald-700">
+                💸 {debts.map((d) => `${d.from} → ${d.to}: ${currencySymbol(cur)}${d.amount.toFixed(2)}`).join(" · ")}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function TxnRow({
+  txn,
+  people,
+  editing,
+  onEdit,
+  onClose,
+  onPatch,
+  onDelete,
+}: {
+  txn: Transaction;
+  people: Person[];
+  editing: boolean;
+  onEdit: () => void;
+  onClose: () => void;
+  onPatch: (body: object) => void;
+  onDelete: () => void;
+}) {
+  return (
+    <>
+      <tr
+        className={`border-t hover:bg-gray-50 ${
+          txn.status === "cancelled" ? "opacity-40 line-through" : ""
+        } ${txn.status === "missed" ? "bg-amber-50" : ""}`}
+      >
+        <td className="px-3 py-2 whitespace-nowrap text-gray-500">{txn.trans_date}</td>
+        <td className="px-3 py-2 font-mono text-xs max-w-xs truncate" title={txn.merchant}>
+          {txn.merchant}
+        </td>
+        <td className="px-3 py-2 text-right font-semibold whitespace-nowrap">
+          {currencySymbol(txn.currency)}{Number(txn.amount).toFixed(2)}
+        </td>
+        <td className="px-3 py-2 text-center text-xs">
+          <span className="px-2 py-1 bg-gray-100 rounded">{txn.payer_name}</span>
+        </td>
+        <td className="px-3 py-2 text-xs text-gray-600">
+          {txn.participants
+            .map((p) => `${p.person_name} ${currencySymbol(txn.currency)}${Number(p.computed_share).toFixed(2)}`)
+            .join(" / ")}
+        </td>
+        <td className="px-3 py-2">
+          <select
+            className="border rounded px-2 py-1 text-xs bg-white"
+            value={txn.category ?? ""}
+            onChange={(e) => onPatch({ category: e.target.value || null })}
+          >
+            <option value="">—</option>
+            {CATEGORIES.map((c) => (
+              <option key={c} value={c}>{c}</option>
+            ))}
+          </select>
+        </td>
+        <td className="px-3 py-2 max-w-sm">
+          <input
+            type="text"
+            defaultValue={txn.note ?? ""}
+            onBlur={(e) => {
+              if (e.target.value !== (txn.note ?? "")) onPatch({ note: e.target.value });
+            }}
+            className="w-full border rounded px-2 py-1 text-xs"
+          />
+        </td>
+        <td className="px-3 py-2 text-right whitespace-nowrap">
+          <button
+            onClick={editing ? onClose : onEdit}
+            className="text-xs text-blue-600 hover:underline mr-2"
+          >
+            {editing ? "收起" : "详情"}
+          </button>
+          <button onClick={onDelete} className="text-xs text-rose-600 hover:underline">
+            删除
+          </button>
+        </td>
+      </tr>
+      {editing && (
+        <tr className="bg-blue-50">
+          <td colSpan={8} className="px-6 py-4">
+            <EditDetail txn={txn} people={people} onPatch={onPatch} />
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
+function EditDetail({
+  txn,
+  people,
+  onPatch,
+}: {
+  txn: Transaction;
+  people: Person[];
+  onPatch: (body: object) => void;
+}) {
+  type ParticipantDraft = {
+    person_id: number;
+    included: boolean;
+    mode: "ratio" | "amount";
+    share_ratio: number;
+    share_amount: number;
+  };
+  const initParticipants: ParticipantDraft[] = people.map((p) => {
+    const existing = txn.participants.find((x) => x.person_id === p.id);
+    return {
+      person_id: p.id,
+      included: !!existing,
+      mode: existing?.share_amount != null ? "amount" : "ratio",
+      share_ratio: existing?.share_ratio != null ? Number(existing.share_ratio) : 0,
+      share_amount: existing?.share_amount != null ? Number(existing.share_amount) : 0,
+    };
+  });
+  const [parts, setParts] = useState<ParticipantDraft[]>(initParticipants);
+  const amount = Number(txn.amount);
+
+  function splitEqually() {
+    const included = parts.filter((p) => p.included);
+    const ratio = included.length ? 1 / included.length : 0;
+    setParts(
+      parts.map((p) =>
+        p.included ? { ...p, mode: "ratio" as const, share_ratio: ratio } : p,
+      ),
+    );
+  }
+
+  function save() {
+    const participants = parts
+      .filter((p) => p.included)
+      .map((p) =>
+        p.mode === "amount"
+          ? { person_id: p.person_id, share_amount: p.share_amount }
+          : { person_id: p.person_id, share_ratio: p.share_ratio },
+      );
+    onPatch({ participants });
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <Field label="日期">
+          <input
+            type="date"
+            defaultValue={txn.trans_date}
+            onBlur={(e) => onPatch({ trans_date: e.target.value })}
+            className="border rounded px-2 py-1 text-sm w-full"
+          />
+        </Field>
+        <Field label="金额">
+          <input
+            type="number"
+            step="0.01"
+            defaultValue={txn.amount}
+            onBlur={(e) => onPatch({ amount: Number(e.target.value) })}
+            className="border rounded px-2 py-1 text-sm w-full"
+          />
+        </Field>
+        <Field label="货币">
+          <select
+            defaultValue={txn.currency}
+            onChange={(e) => onPatch({ currency: e.target.value })}
+            className="border rounded px-2 py-1 text-sm w-full"
+          >
+            {CURRENCIES.map((c) => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </Field>
+        <Field label="出账人">
+          <select
+            defaultValue={txn.payer_id}
+            onChange={(e) => onPatch({ payer_id: Number(e.target.value) })}
+            className="border rounded px-2 py-1 text-sm w-full"
+          >
+            {people.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+        </Field>
+        <Field label="商户">
+          <input
+            type="text"
+            defaultValue={txn.merchant}
+            onBlur={(e) => onPatch({ merchant: e.target.value })}
+            className="border rounded px-2 py-1 text-sm w-full"
+          />
+        </Field>
+        <Field label="状态">
+          <select
+            defaultValue={txn.status}
+            onChange={(e) => onPatch({ status: e.target.value })}
+            className="border rounded px-2 py-1 text-sm w-full"
+          >
+            <option value="completed">已完成</option>
+            <option value="missed">错过</option>
+            <option value="cancelled">已取消</option>
+          </select>
+        </Field>
       </div>
-      <div className="text-xl font-bold mt-1">
-        {currencySymbol(currency)}
-        {value.toFixed(2)}
+
+      <div className="border-t pt-3">
+        <div className="flex items-center justify-between mb-2">
+          <div className="text-sm font-medium">分摊明细</div>
+          <button
+            onClick={splitEqually}
+            className="text-xs text-blue-600 hover:underline"
+          >
+            均分
+          </button>
+        </div>
+        <div className="space-y-2">
+          {parts.map((p, i) => {
+            const person = people.find((x) => x.id === p.person_id)!;
+            return (
+              <div key={p.person_id} className="flex items-center gap-3 text-sm">
+                <label className="flex items-center gap-2 w-24">
+                  <input
+                    type="checkbox"
+                    checked={p.included}
+                    onChange={(e) => {
+                      const next = [...parts];
+                      next[i] = { ...p, included: e.target.checked };
+                      setParts(next);
+                    }}
+                  />
+                  {person.name}
+                </label>
+                {p.included && (
+                  <>
+                    <select
+                      value={p.mode}
+                      onChange={(e) => {
+                        const next = [...parts];
+                        next[i] = { ...p, mode: e.target.value as "ratio" | "amount" };
+                        setParts(next);
+                      }}
+                      className="border rounded px-2 py-1 text-xs"
+                    >
+                      <option value="ratio">按比例</option>
+                      <option value="amount">按金额</option>
+                    </select>
+                    {p.mode === "ratio" ? (
+                      <>
+                        <input
+                          type="number"
+                          step="0.01"
+                          min="0"
+                          max="1"
+                          value={p.share_ratio}
+                          onChange={(e) => {
+                            const next = [...parts];
+                            next[i] = { ...p, share_ratio: Number(e.target.value) };
+                            setParts(next);
+                          }}
+                          className="border rounded px-2 py-1 text-xs w-24"
+                        />
+                        <span className="text-xs text-gray-500">
+                          = {currencySymbol(txn.currency)}{(p.share_ratio * amount).toFixed(2)}
+                        </span>
+                      </>
+                    ) : (
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        value={p.share_amount}
+                        onChange={(e) => {
+                          const next = [...parts];
+                          next[i] = { ...p, share_amount: Number(e.target.value) };
+                          setParts(next);
+                        }}
+                        className="border rounded px-2 py-1 text-xs w-32"
+                      />
+                    )}
+                  </>
+                )}
+              </div>
+            );
+          })}
+        </div>
+        <button
+          onClick={save}
+          className="mt-3 bg-emerald-600 hover:bg-emerald-700 text-white text-sm px-4 py-1.5 rounded"
+        >
+          保存分摊
+        </button>
       </div>
+    </div>
+  );
+}
+
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <div className="text-xs text-gray-500 mb-1">{label}</div>
+      {children}
     </div>
   );
 }

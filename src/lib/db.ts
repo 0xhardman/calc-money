@@ -6,27 +6,32 @@ declare global {
 }
 
 export const pool =
-  global.__pgPool ??
-  new Pool({ connectionString: process.env.DATABASE_URL });
+  global.__pgPool ?? new Pool({ connectionString: process.env.DATABASE_URL });
 
 if (process.env.NODE_ENV !== "production") global.__pgPool = pool;
+
+export type Person = { id: number; name: string };
+
+export type Participant = {
+  person_id: number;
+  person_name: string;
+  share_amount: string | null;
+  share_ratio: string | null;
+  computed_share: string; // 实际分摊金额（系统算）
+};
 
 export type Transaction = {
   id: number;
   trans_date: string;
   merchant: string;
-  rmb_amount: string;
-  original_amount: string | null;
-  original_currency: string | null;
-  country: string | null;
-  txn_type: string | null;
+  amount: string;
+  currency: string;
+  payer_id: number;
+  payer_name: string;
   category: string | null;
   note: string | null;
-  is_trip: boolean;
-  is_shared: boolean;
-  share_count: number;
-  my_share: string | null;
-  status: string | null;
-  source: string | null;
-  paid_by: string;
+  status: string;
+  source: string;
+  rmb_amount: string | null;
+  participants: Participant[];
 };
