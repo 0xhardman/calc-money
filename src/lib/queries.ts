@@ -3,7 +3,7 @@ export const TRANSACTION_COLUMNS = `
   t.id,
   to_char(t.trans_date, 'YYYY-MM-DD') AS trans_date,
   t.merchant, t.amount, t.currency, t.category, t.note,
-  t.status, t.source, t.rmb_amount,
+  t.status, t.source, t.rmb_amount, t.verified, t.verified_at,
   t.payer_id, payer.name AS payer_name,
   COALESCE(
     json_agg(

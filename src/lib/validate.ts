@@ -15,6 +15,7 @@ export const TransactionPatch = z.object({
   category: z.string().max(50).nullable().optional(),
   note: z.string().max(500).nullable().optional(),
   status: z.enum(["completed", "cancelled", "missed"]).optional(),
+  verified: z.boolean().optional(),
   participants: z.array(ParticipantInput).optional(),
 });
 

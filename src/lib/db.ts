@@ -33,5 +33,7 @@ export type Transaction = {
   status: string;
   source: string;
   rmb_amount: string | null;
+  verified: boolean;
+  verified_at: string | null;
   participants: Participant[];
 };

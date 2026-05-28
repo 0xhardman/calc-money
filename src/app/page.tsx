@@ -14,6 +14,7 @@ export default function Home() {
   const [people, setPeople] = useState<Person[]>([]);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState<number | null>(null);
+  const [hideVerified, setHideVerified] = useState(false);
 
   useEffect(() => {
     Promise.all([
@@ -96,6 +97,9 @@ export default function Home() {
     return buckets;
   }, [txns, people]);
 
+  const verifiedCount = txns.filter((t) => t.verified).length;
+  const visibleTxns = hideVerified ? txns.filter((t) => !t.verified) : txns;
+
   if (loading) return <div className="p-8 text-gray-500">加载中…</div>;
 
   return (
@@ -110,9 +114,22 @@ export default function Home() {
             + 新增账单
           </button>
         </div>
-        <p className="text-sm text-gray-500 mb-6">
-          5/13 – 5/23 · 同行人: {people.map((p) => p.name).join(", ")}
-        </p>
+        <div className="flex items-center justify-between text-sm text-gray-500 mb-6">
+          <span>5/13 – 5/23 · 同行人: {people.map((p) => p.name).join(", ")}</span>
+          <div className="flex items-center gap-3">
+            <span>
+              已核对 <span className="font-semibold text-emerald-600">{verifiedCount}</span> / {txns.length}
+            </span>
+            <label className="flex items-center gap-1 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={hideVerified}
+                onChange={(e) => setHideVerified(e.target.checked)}
+              />
+              隐藏已核对
+            </label>
+          </div>
+        </div>
 
         <Settlements buckets={summary} people={people} />
 
@@ -120,6 +137,7 @@ export default function Home() {
           <table className="min-w-full text-sm">
             <thead className="bg-gray-100 text-gray-600">
               <tr>
+                <th className="px-3 py-2 w-8 text-center">✓</th>
                 <th className="px-3 py-2 text-left">日期</th>
                 <th className="px-3 py-2 text-left">商户</th>
                 <th className="px-3 py-2 text-right">金额</th>
@@ -131,7 +149,7 @@ export default function Home() {
               </tr>
             </thead>
             <tbody>
-              {txns.map((t) => (
+              {visibleTxns.map((t) => (
                 <TxnRow
                   key={t.id}
                   txn={t}
@@ -234,8 +252,23 @@ function TxnRow({
       <tr
         className={`border-t hover:bg-gray-50 ${
           txn.status === "cancelled" ? "opacity-40 line-through" : ""
-        } ${txn.status === "missed" ? "bg-amber-50" : ""}`}
+        } ${txn.status === "missed" ? "bg-amber-50" : ""} ${
+          txn.verified ? "bg-emerald-50/60" : ""
+        }`}
       >
+        <td className="px-3 py-2 text-center">
+          <input
+            type="checkbox"
+            checked={txn.verified}
+            onChange={(e) => onPatch({ verified: e.target.checked })}
+            className="w-4 h-4 accent-emerald-600 cursor-pointer"
+            title={
+              txn.verified && txn.verified_at
+                ? `已核对 ${new Date(txn.verified_at).toLocaleString()}`
+                : "标记为已核对"
+            }
+          />
+        </td>
         <td className="px-3 py-2 whitespace-nowrap text-gray-500">{txn.trans_date}</td>
         <td className="px-3 py-2 font-mono text-xs max-w-xs truncate" title={txn.merchant}>
           {txn.merchant}
@@ -287,7 +320,7 @@ function TxnRow({
       </tr>
       {editing && (
         <tr className="bg-blue-50">
-          <td colSpan={8} className="px-6 py-4">
+          <td colSpan={9} className="px-6 py-4">
             <EditDetail txn={txn} people={people} onPatch={onPatch} />
           </td>
         </tr>

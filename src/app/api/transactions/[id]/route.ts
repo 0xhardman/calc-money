@@ -40,6 +40,11 @@ export async function PATCH(
         vals.push(d[key]);
       }
     }
+    if (d.verified !== undefined) {
+      setExprs.push(`verified = $${i++}`);
+      vals.push(d.verified);
+      setExprs.push(`verified_at = ${d.verified ? "NOW()" : "NULL"}`);
+    }
     if (setExprs.length) {
       vals.push(txnId);
       await client.query(
