@@ -132,7 +132,10 @@ export default function Home() {
           </div>
         </div>
 
-        <USDSettlement summary={summary} people={people} rates={rates} meta={ratesMeta} />
+        <FxTriangle rates={rates} meta={ratesMeta} />
+        <div className="mt-6">
+          <USDSettlement summary={summary} people={people} rates={rates} meta={ratesMeta} />
+        </div>
 
         <div className="mt-6 bg-white rounded-lg shadow overflow-hidden">
           <table className="min-w-full text-sm">
@@ -167,6 +170,109 @@ export default function Home() {
         </div>
       </div>
     </main>
+  );
+}
+
+function FxTriangle({
+  rates,
+  meta,
+}: {
+  rates: Record<string, number>;
+  meta: { fetched_at?: string; stale?: boolean };
+}) {
+  const usdEur = rates.EUR ?? 0; // 1 USD = x EUR
+  const usdCny = rates.CNY ?? 0; // 1 USD = x CNY
+  const eurCny = usdEur ? usdCny / usdEur : 0; // 1 EUR = x CNY
+
+  return (
+    <div className="bg-white rounded-lg shadow p-6 mb-6">
+      <div className="flex items-baseline justify-between mb-4">
+        <h2 className="text-lg font-semibold">💱 汇率三角</h2>
+        <div className="text-xs text-gray-400">
+          {meta.fetched_at
+            ? `${new Date(meta.fetched_at).toLocaleString()} ${meta.stale ? "(stale)" : ""}`
+            : ""}
+        </div>
+      </div>
+
+      <div className="relative mx-auto" style={{ width: 520, height: 380 }}>
+        <svg
+          viewBox="0 0 520 380"
+          className="absolute inset-0 w-full h-full"
+        >
+          {/* 三角形边 */}
+          <polygon
+            points="260,40 60,330 460,330"
+            fill="none"
+            stroke="#cbd5e1"
+            strokeWidth="2"
+          />
+        </svg>
+
+        {/* 顶点：USD */}
+        <Vertex top={5} left={260} flag="🇺🇸" code="USD" color="emerald" />
+        {/* 左下：EUR */}
+        <Vertex top={300} left={60} flag="🇪🇺" code="EUR" color="blue" />
+        {/* 右下：CNY */}
+        <Vertex top={300} left={460} flag="🇨🇳" code="CNY" color="rose" />
+
+        {/* 边标签：USD <-> EUR (左边) */}
+        <EdgeLabel
+          top={170} left={90}
+          forward={`1 USD = €${usdEur.toFixed(4)}`}
+          backward={`1 EUR = $${(1 / usdEur).toFixed(4)}`}
+        />
+        {/* 边标签：USD <-> CNY (右边) */}
+        <EdgeLabel
+          top={170} left={350}
+          forward={`1 USD = ¥${usdCny.toFixed(4)}`}
+          backward={`1 CNY = $${(1 / usdCny).toFixed(4)}`}
+        />
+        {/* 边标签：EUR <-> CNY (底边) */}
+        <EdgeLabel
+          top={340} left={210}
+          forward={`1 EUR = ¥${eurCny.toFixed(4)}`}
+          backward={`1 CNY = €${(1 / eurCny).toFixed(4)}`}
+        />
+      </div>
+    </div>
+  );
+}
+
+function Vertex({
+  top, left, flag, code, color,
+}: { top: number; left: number; flag: string; code: string; color: string }) {
+  const colorMap: Record<string, string> = {
+    emerald: "bg-emerald-500",
+    blue:    "bg-blue-500",
+    rose:    "bg-rose-500",
+  };
+  return (
+    <div
+      className="absolute flex flex-col items-center"
+      style={{ top, left, transform: "translate(-50%, 0)" }}
+    >
+      <div
+        className={`${colorMap[color]} text-white rounded-full w-16 h-16 flex items-center justify-center text-2xl shadow-lg`}
+      >
+        {flag}
+      </div>
+      <div className="mt-1 text-sm font-bold text-gray-700">{code}</div>
+    </div>
+  );
+}
+
+function EdgeLabel({
+  top, left, forward, backward,
+}: { top: number; left: number; forward: string; backward: string }) {
+  return (
+    <div
+      className="absolute bg-white border border-gray-200 rounded-md px-3 py-2 shadow text-center"
+      style={{ top, left, transform: "translate(-50%, -50%)" }}
+    >
+      <div className="text-sm font-mono font-semibold text-gray-800">{forward}</div>
+      <div className="text-xs font-mono text-gray-500 mt-0.5">{backward}</div>
+    </div>
   );
 }
 
