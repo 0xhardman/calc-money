@@ -15,17 +15,30 @@ export default function Home() {
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState<number | null>(null);
   const [hideVerified, setHideVerified] = useState(false);
+  const [rates, setRates] = useState<Record<string, number>>({ USD: 1 });
+  const [ratesMeta, setRatesMeta] = useState<{ fetched_at?: string; stale?: boolean }>({});
 
   useEffect(() => {
     Promise.all([
       fetch("/api/transactions").then((r) => r.json()),
       fetch("/api/people").then((r) => r.json()),
-    ]).then(([t, p]) => {
+      fetch("/api/rates").then((r) => r.json()),
+    ]).then(([t, p, r]) => {
       setTxns(t);
       setPeople(p);
+      setRates({ USD: 1, ...r.rates });
+      setRatesMeta({ fetched_at: r.fetched_at, stale: r.stale });
       setLoading(false);
     });
   }, []);
+
+  // 任意币种 -> USD
+  function toUSD(amount: number, currency: string): number {
+    if (currency === "USD") return amount;
+    const r = rates[currency];
+    if (!r) return amount; // 汇率未取到时按 1:1，避免 NaN
+    return amount / r; // rates 是 1 USD = x foreign
+  }
 
   async function patch(id: number, body: object) {
     const r = await fetch(`/api/transactions/${id}`, {
@@ -65,37 +78,25 @@ export default function Home() {
     setTxns((prev) => prev.filter((t) => t.id !== id));
   }
 
-  // 按币种聚合，计算每个人的净额
+  // 统一换算成 USD 后汇总
   const summary = useMemo(() => {
-    type Bucket = {
-      total: number;
-      paid: Record<number, number>;     // person_id -> paid amount
-      consumed: Record<number, number>; // person_id -> share consumed
-    };
-    const buckets: Record<string, Bucket> = {};
-    const ensure = (c: string): Bucket => {
-      if (!buckets[c]) {
-        buckets[c] = { total: 0, paid: {}, consumed: {} };
-        people.forEach((p) => {
-          buckets[c].paid[p.id] = 0;
-          buckets[c].consumed[p.id] = 0;
-        });
-      }
-      return buckets[c];
-    };
+    let total = 0;
+    const paid: Record<number, number> = {};
+    const consumed: Record<number, number> = {};
+    people.forEach((p) => { paid[p.id] = 0; consumed[p.id] = 0; });
 
     for (const t of txns) {
       if (t.status === "cancelled") continue;
-      const b = ensure(t.currency);
-      const amt = Number(t.amount);
-      b.total += amt;
-      b.paid[t.payer_id] = (b.paid[t.payer_id] ?? 0) + amt;
+      const usd = toUSD(Number(t.amount), t.currency);
+      total += usd;
+      paid[t.payer_id] = (paid[t.payer_id] ?? 0) + usd;
       for (const p of t.participants) {
-        b.consumed[p.person_id] = (b.consumed[p.person_id] ?? 0) + Number(p.computed_share);
+        const pUSD = toUSD(Number(p.computed_share), t.currency);
+        consumed[p.person_id] = (consumed[p.person_id] ?? 0) + pUSD;
       }
     }
-    return buckets;
-  }, [txns, people]);
+    return { total, paid, consumed };
+  }, [txns, people, rates]);
 
   const verifiedCount = txns.filter((t) => t.verified).length;
   const visibleTxns = hideVerified ? txns.filter((t) => !t.verified) : txns;
@@ -131,7 +132,7 @@ export default function Home() {
           </div>
         </div>
 
-        <Settlements buckets={summary} people={people} />
+        <USDSettlement summary={summary} people={people} rates={rates} meta={ratesMeta} />
 
         <div className="mt-6 bg-white rounded-lg shadow overflow-hidden">
           <table className="min-w-full text-sm">
@@ -169,63 +170,67 @@ export default function Home() {
   );
 }
 
-function Settlements({
-  buckets,
+function USDSettlement({
+  summary,
   people,
+  rates,
+  meta,
 }: {
-  buckets: Record<string, { total: number; paid: Record<number, number>; consumed: Record<number, number> }>;
+  summary: { total: number; paid: Record<number, number>; consumed: Record<number, number> };
   people: Person[];
+  rates: Record<string, number>;
+  meta: { fetched_at?: string; stale?: boolean };
 }) {
-  return (
-    <div className="space-y-4">
-      {Object.entries(buckets).map(([cur, b]) => {
-        const nets: Record<number, number> = {};
-        people.forEach((p) => {
-          nets[p.id] = (b.paid[p.id] ?? 0) - (b.consumed[p.id] ?? 0);
-        });
-        // 两两关系: 谁付谁多少 (净额视角下，正数=应收，负数=应付)
-        // 简单 2 人: A net = +X 表示 B 欠 A X
-        const sorted = [...people].sort((a, b) => (nets[b.id] ?? 0) - (nets[a.id] ?? 0));
-        const debts: { from: string; to: string; amount: number }[] = [];
-        if (people.length === 2 && sorted.length === 2) {
-          const creditor = sorted[0];
-          const debtor = sorted[1];
-          const amt = (nets[creditor.id] ?? 0);
-          if (amt > 0.01) debts.push({ from: debtor.name, to: creditor.name, amount: amt });
-        }
+  const nets: Record<number, number> = {};
+  people.forEach((p) => {
+    nets[p.id] = (summary.paid[p.id] ?? 0) - (summary.consumed[p.id] ?? 0);
+  });
+  const sorted = [...people].sort((a, b) => (nets[b.id] ?? 0) - (nets[a.id] ?? 0));
+  let debt: { from: string; to: string; amount: number } | null = null;
+  if (people.length === 2) {
+    const amt = nets[sorted[0].id] ?? 0;
+    if (Math.abs(amt) > 0.01) {
+      debt = { from: sorted[1].name, to: sorted[0].name, amount: Math.abs(amt) };
+    }
+  }
 
-        return (
-          <div key={cur} className="bg-white rounded-lg shadow p-4">
-            <div className="flex items-center gap-3 mb-3">
-              <span className="text-sm font-semibold text-gray-700">{currencyLabel(cur)}</span>
-              <span className="text-xs text-gray-400">总花费 {currencySymbol(cur)}{b.total.toFixed(2)}</span>
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-              {people.map((p) => {
-                const paid = b.paid[p.id] ?? 0;
-                const consumed = b.consumed[p.id] ?? 0;
-                const net = paid - consumed;
-                return (
-                  <div key={p.id} className="border rounded p-3">
-                    <div className="font-medium text-sm">{p.name}</div>
-                    <div className="text-xs text-gray-500 mt-1">
-                      已付 {currencySymbol(cur)}{paid.toFixed(2)} · 消费 {currencySymbol(cur)}{consumed.toFixed(2)}
-                    </div>
-                    <div className={`mt-1 text-sm font-semibold ${net >= 0 ? "text-emerald-600" : "text-rose-600"}`}>
-                      {net >= 0 ? "应收" : "应付"} {currencySymbol(cur)}{Math.abs(net).toFixed(2)}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-            {debts.length > 0 && (
-              <div className="mt-3 p-2 bg-emerald-50 rounded text-sm text-emerald-700">
-                💸 {debts.map((d) => `${d.from} → ${d.to}: ${currencySymbol(cur)}${d.amount.toFixed(2)}`).join(" · ")}
+  return (
+    <div className="bg-white rounded-lg shadow p-5">
+      <div className="flex items-baseline justify-between mb-1">
+        <h2 className="text-lg font-semibold">💵 USD 结算</h2>
+        <div className="text-xs text-gray-400">
+          汇率 1 USD = €{rates.EUR?.toFixed(4)} · ¥{rates.CNY?.toFixed(4)} · ₺{rates.TRY?.toFixed(4)}
+          {meta.fetched_at && (
+            <span className="ml-2">
+              · {new Date(meta.fetched_at).toLocaleString()} {meta.stale && "(stale)"}
+            </span>
+          )}
+        </div>
+      </div>
+      <div className="text-sm text-gray-500 mb-4">总花费 ${summary.total.toFixed(2)}</div>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
+        {people.map((p) => {
+          const paid = summary.paid[p.id] ?? 0;
+          const consumed = summary.consumed[p.id] ?? 0;
+          const net = paid - consumed;
+          return (
+            <div key={p.id} className="border rounded p-3">
+              <div className="font-medium text-sm">{p.name}</div>
+              <div className="text-xs text-gray-500 mt-1">
+                已付 ${paid.toFixed(2)} · 消费 ${consumed.toFixed(2)}
               </div>
-            )}
-          </div>
-        );
-      })}
+              <div className={`mt-1 text-base font-semibold ${net >= 0 ? "text-emerald-600" : "text-rose-600"}`}>
+                {net >= 0 ? "应收" : "应付"} ${Math.abs(net).toFixed(2)}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      {debt && (
+        <div className="p-3 bg-emerald-50 rounded text-sm text-emerald-700 font-medium">
+          💸 {debt.from} → {debt.to}: <span className="text-lg">${debt.amount.toFixed(2)}</span>
+        </div>
+      )}
     </div>
   );
 }
@@ -548,12 +553,3 @@ function currencySymbol(c: string | null): string {
   }
 }
 
-function currencyLabel(c: string): string {
-  switch (c) {
-    case "EUR": return "🇪🇺 欧元 EUR";
-    case "CNY": return "🇨🇳 人民币 CNY";
-    case "TRY": return "🇹🇷 土耳其里拉 TRY";
-    case "USD": return "🇺🇸 美元 USD";
-    default: return c;
-  }
-}
